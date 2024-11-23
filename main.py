@@ -6,16 +6,13 @@ import torch
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap, QGuiApplication
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QLabel, QVBoxLayout, QPushButton, QFileDialog, QMessageBox, QHBoxLayout
+    QApplication, QWidget, QLabel, QVBoxLayout, QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QCheckBox
 )
 from pyiqa import create_metric
 from skimage import io
-from skimage.color import rgb2gray
-from skimage.metrics import peak_signal_noise_ratio as psnr
-from skimage.metrics import structural_similarity as ssim
 from skimage.util import img_as_float32
 
-from metric import comp_upto_shift
+from metric import comp_upto_shift_rgb2
 
 
 class ImageComparisonApp(QWidget):
@@ -52,6 +49,14 @@ class ImageComparisonApp(QWidget):
         self.button_calculate = QPushButton('Calculate Metrics')
         self.button_calculate.clicked.connect(self.calculate_metrics)
         self.layout.addWidget(self.button_calculate)
+
+        self.lpips_checkbox = QCheckBox("Compute LPIPS")
+        self.lpips_checkbox.setChecked(True)
+        self.layout.addWidget(self.lpips_checkbox)
+
+        self.unmetrics_checkbox = QCheckBox("Compute Unsupervised Metrics")
+        self.unmetrics_checkbox.setChecked(True)
+        self.layout.addWidget(self.unmetrics_checkbox)
 
         # Results with copy buttons
         self.result_layout_psnr = self.create_result_row("PSNR", self.copy_psnr)
@@ -139,17 +144,20 @@ class ImageComparisonApp(QWidget):
 
         # Load and preprocess images
         blurry_image = img_as_float32(io.imread(self.blurry_image_path))[:, :, :3]
-        blurry_tensor = torch.tensor(blurry_image).permute(2, 0, 1).unsqueeze(0)
+        blurry_tensor = torch.tensor(blurry_image).permute(2, 0, 1).unsqueeze(0).cuda()
 
-        # Calculate NIQE, BRISQUE, PIQE
-        niqe_metric = create_metric('niqe')
-        self.niqe_value = niqe_metric(blurry_tensor).item()
+        if self.unmetrics_checkbox.isChecked():
+            # Calculate NIQE, BRISQUE, PIQE
+            niqe_metric = create_metric('niqe').cuda()
+            self.niqe_value = niqe_metric(blurry_tensor).item()
 
-        brisque_metric = create_metric('brisque')
-        self.brisque_value = brisque_metric(blurry_tensor).item()
+            brisque_metric = create_metric('brisque').cuda()
+            self.brisque_value = brisque_metric(blurry_tensor).item()
 
-        piqe_metric = create_metric('piqe')
-        self.piqe_value = piqe_metric(blurry_tensor).item()
+            piqe_metric = create_metric('piqe').cuda()
+            self.piqe_value = piqe_metric(blurry_tensor).item()
+        else:
+            self.niqe_value = self.brisque_value = self.piqe_value = None
 
         if self.gt_image_path:
             # Load images
@@ -162,17 +170,22 @@ class ImageComparisonApp(QWidget):
                 return
 
             # Normalize images to [0, 1]
-            blurry_image = rgb2gray(img_as_float32(blurry_image))
-            gt_image = rgb2gray(img_as_float32(gt_image))
+            blurry_image = img_as_float32(blurry_image)
+            gt_image = img_as_float32(gt_image)
 
             # Compute PSNR and SSIM using comp_upto_shift
-            self.psnr_value, self.ssim_value, _ = comp_upto_shift(gt_image, blurry_image, maxshift=5)
+            self.psnr_value, self.ssim_value, _ = comp_upto_shift_rgb2(gt_image, blurry_image, maxshift=5)
 
-            # Compute LPIPS (remains RGB, use original color images)
-            loss_fn = lpips.LPIPS(net='vgg')
-            blurry_tensor = torch.tensor(io.imread(self.blurry_image_path)[:, :, :3]).permute(2, 0, 1).unsqueeze(0)
-            gt_tensor = torch.tensor(io.imread(self.gt_image_path)[:, :, :3]).permute(2, 0, 1).unsqueeze(0)
-            self.lpips_value = loss_fn(gt_tensor, blurry_tensor).item()
+            if self.lpips_checkbox.isChecked():
+                loss_fn = lpips.LPIPS(net='vgg').cuda()
+                # 转为 PyTorch tensor
+                gt_tensor = torch.tensor(gt_image).permute(2, 0, 1).unsqueeze(0).cuda()
+                blurry_tensor = torch.tensor(blurry_image).permute(2, 0, 1).unsqueeze(0).cuda()
+                # 计算 LPIPS 值
+                lpips_value = loss_fn(gt_tensor, blurry_tensor)
+                self.lpips_value = lpips_value.item()
+            else:
+                self.lpips_value = None
 
         # Update UI
         self.result_psnr_label.setText(f"PSNR: {self.psnr_value:.2f}" if self.psnr_value else "PSNR: N/A")
