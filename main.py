@@ -12,7 +12,7 @@ from pyiqa import create_metric
 from skimage import io
 from skimage.util import img_as_float32
 
-from metric import comp_upto_shift_rgb2
+from metric import comp_upto_shift_rgb, comp_upto_shift_rgb_gpu
 
 
 class ImageComparisonApp(QWidget):
@@ -137,6 +137,27 @@ class ImageComparisonApp(QWidget):
             folder_name = os.path.basename(os.path.dirname(file_path))
             self.label_gt_dir.setText(f"Ground Truth Directory: {folder_name}")
 
+    def adjust_image_size(self, image, target_shape):
+        """
+        调整图像尺寸，通过裁剪较大图像的边缘使其与目标尺寸一致。
+
+        :param image: 需要调整的图像 (numpy array)
+        :param target_shape: 目标图像的形状 (height, width, channels)
+        :return: 调整后的图像
+        """
+        height, width, channels = target_shape
+        current_height, current_width, _ = image.shape
+
+        # 计算需要裁剪的像素数
+        crop_height = (current_height - height) // 2
+        crop_width = (current_width - width) // 2
+
+        # 裁剪图像
+        if crop_height > 0 and crop_width > 0:
+            return image[crop_height:crop_height + height, crop_width:crop_width + width, :]
+        else:
+            return image
+
     def calculate_metrics(self):
         if not self.blurry_image_path:
             QMessageBox.warning(self, "Warning", "Please load an image for assessment.")
@@ -166,15 +187,26 @@ class ImageComparisonApp(QWidget):
 
             # Ensure images have the same dimensions
             if blurry_image.shape != gt_image.shape:
-                QMessageBox.warning(self, "Warning", "Blurry and ground truth images must have the same dimensions.")
-                return
+                # 获取较小的图像尺寸
+                target_shape = min(blurry_image.shape, gt_image.shape, key=lambda x: x[0] * x[1])
+
+                # 调整较大图像的尺寸
+                if blurry_image.shape != target_shape:
+                    blurry_image = self.adjust_image_size(blurry_image, target_shape)
+                if gt_image.shape != target_shape:
+                    gt_image = self.adjust_image_size(gt_image, target_shape)
+
+                # 如果调整后尺寸仍然不一致，弹出警告
+                if blurry_image.shape != gt_image.shape:
+                    QMessageBox.warning(self, "Warning", "无法将图像调整为相同尺寸。")
+                    return
 
             # Normalize images to [0, 1]
             blurry_image = img_as_float32(blurry_image)
             gt_image = img_as_float32(gt_image)
 
             # Compute PSNR and SSIM using comp_upto_shift
-            self.psnr_value, self.ssim_value, _ = comp_upto_shift_rgb2(gt_image, blurry_image, maxshift=5)
+            self.psnr_value, self.ssim_value = comp_upto_shift_rgb_gpu(gt_image, blurry_image, maxshift=5)
 
             if self.lpips_checkbox.isChecked():
                 loss_fn = lpips.LPIPS(net='vgg').cuda()
